@@ -388,13 +388,15 @@ class PoseCoachGUI:
             elbow = right_elbow
             wrist = right_wrist
             angle = right_angle
-            self.curl_side = "right"
+            # Camera is flipped, so right arm appears on left side of screen
+            self.curl_side = "left"  # Display as left (what user sees)
         else:
             shoulder = left_shoulder
             elbow = left_elbow
             wrist = left_wrist
             angle = left_angle
-            self.curl_side = "left"
+            # Camera is flipped, so left arm appears on right side of screen
+            self.curl_side = "right"  # Display as right (what user sees)
 
         self.current_angle = self.get_smoothed_angle(angle)
 
@@ -404,44 +406,54 @@ class PoseCoachGUI:
         # Rep detection logic - curl has opposite angle logic
         # Extended arm = high angle (~160-180°)
         # Curled arm = low angle (~30-50°)
-        if self.current_angle > 150:  # Arm extended
-            self.stage = "down"
-            if self.rest_start:
-                self.rest_time += time.time() - self.rest_start
-                self.rest_start = None
 
-        if self.current_angle < 50 and self.stage == 'down':  # Arm fully curled
-            self.stage = "up"
-            self.rep_count += 1
+        # State machine for reliable rep counting
+        if self.current_angle > 160:  # Arm fully extended
+            if self.stage != "extended":
+                self.stage = "extended"
+                if self.rest_start:
+                    self.rest_time += time.time() - self.rest_start
+                    self.rest_start = None
 
-            if self.rep_start_time:
-                rep_duration = time.time() - self.rep_start_time
-                self.rep_times.append(rep_duration)
-            self.rep_start_time = time.time()
+        elif self.current_angle < 60:  # Arm fully curled
+            if self.stage == "extended":  # Only count if coming from extended
+                self.stage = "curled"
+                self.rep_count += 1
 
-            # For bicep curls, best angle is the SMALLEST angle (full contraction)
-            if self.best_angle is None or self.current_angle < self.best_angle:
-                self.best_angle = self.current_angle
+                if self.rep_start_time:
+                    rep_duration = time.time() - self.rep_start_time
+                    self.rep_times.append(rep_duration)
+                self.rep_start_time = time.time()
 
-            if self.audio_enabled.get():
-                print('\a')
+                # For bicep curls, best angle is the SMALLEST angle (full contraction)
+                if self.best_angle is None or self.current_angle < self.best_angle:
+                    self.best_angle = self.current_angle
 
-            self.rest_start = time.time()
+                if self.audio_enabled.get():
+                    print('\a')
+
+                self.rest_start = time.time()
+
+        elif 60 <= self.current_angle <= 160:  # In between
+            if self.stage not in ["extended", "curled"]:
+                self.stage = "transitioning"
 
         # Form feedback
         feedback = ""
-        if self.stage == "up":
-            if self.current_angle > 70:
+        if self.stage == "curled":
+            if self.current_angle > 80:
                 feedback = "CURL MORE!"
-            elif self.current_angle < 30:
+            elif self.current_angle < 40:
                 feedback = "GREAT CONTRACTION!"
             else:
                 feedback = "GOOD CURL!"
-        elif self.stage == "down":
-            if self.current_angle < 140:
-                feedback = "EXTEND FULLY!"
+        elif self.stage == "extended":
+            feedback = "READY - CURL NOW!"
+        elif self.stage == "transitioning":
+            if self.current_angle < 100:
+                feedback = "KEEP CURLING!"
             else:
-                feedback = "GOOD EXTENSION!"
+                feedback = "EXTEND FULLY!"
 
         # Check for elbow swing (bad form)
         if elbow_drift > 25:
@@ -613,12 +625,23 @@ class PoseCoachGUI:
                 left_angle = self.calculate_angle(left_shoulder, left_elbow, left_wrist)
                 right_angle = self.calculate_angle(right_shoulder, right_elbow, right_wrist)
 
-                # Draw angle info on video
+                # Draw angle info on video with color coding
                 h, w = image.shape[:2]
-                cv2.putText(image, f"Left: {left_angle:.1f}°", (10, h - 80),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(image, f"Right: {right_angle:.1f}°", (10, h - 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+                # Left arm (appears on right side of screen due to flip)
+                left_color = (0, 255, 0) if left_angle < 60 else (0, 165, 255) if left_angle > 160 else (255, 255, 255)
+                cv2.putText(image, f"Right Arm: {left_angle:.1f}", (w - 250, h - 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, left_color, 2)
+
+                # Right arm (appears on left side of screen due to flip)
+                right_color = (0, 255, 0) if right_angle < 60 else (0, 165, 255) if right_angle > 160 else (255, 255,
+                                                                                                            255)
+                cv2.putText(image, f"Left Arm: {right_angle:.1f}", (10, h - 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, right_color, 2)
+
+                # Show thresholds
+                cv2.putText(image, "Extended: >160  |  Curled: <60", (w // 2 - 180, h - 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
             if self.exercise_type == "squat":
                 required = ['left_hip', 'left_knee', 'left_ankle']
