@@ -78,6 +78,12 @@ class PoseCoachGUI:
         # Feedback display duration
         self.feedback_duration = tk.DoubleVar(value=1.5)
 
+        # Rest/sets settings
+        self.reps_per_set = tk.IntVar(value=10)  # prompt rest after this many reps
+        self.rest_prompt_duration = tk.IntVar(value=30)  # seconds to suggest rest
+        self.rest_prompt_active = False
+        self.rest_prompt_end_time = 0
+
         # Setup GUI
         self.setup_gui()
 
@@ -247,13 +253,13 @@ class PoseCoachGUI:
         depth_slider.pack(fill=tk.X)
 
         # Feedback duration
-        feedback_frame = tk.Frame(settings_frame, bg='#2d2d2d')
-        feedback_frame.pack(fill=tk.X, padx=10, pady=5)
+        fb_frame = tk.Frame(settings_frame, bg='#2d2d2d')
+        fb_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(feedback_frame, text="Feedback Speed (seconds):", bg='#2d2d2d',
+        tk.Label(fb_frame, text="Feedback Speed (seconds):", bg='#2d2d2d',
                  fg='white', font=('Arial', 9)).pack(anchor='w')
 
-        feedback_slider = tk.Scale(feedback_frame, from_=0.5, to=3.0,
+        feedback_slider = tk.Scale(fb_frame, from_=0.5, to=3.0,
                                    resolution=0.5,
                                    variable=self.feedback_duration,
                                    orient=tk.HORIZONTAL, bg='#2d2d2d',
@@ -261,6 +267,28 @@ class PoseCoachGUI:
                                    troughcolor='#444444', activebackground='#00ff88',
                                    command=self.update_feedback_cooldown)
         feedback_slider.pack(fill=tk.X)
+
+        # Reps per set
+        reps_frame = tk.Frame(settings_frame, bg='#2d2d2d')
+        reps_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(reps_frame, text="Reps per set:", bg='#2d2d2d',
+                 fg='white', font=('Arial', 9)).pack(side=tk.LEFT)
+        reps_spin = tk.Spinbox(reps_frame, from_=5, to=50, width=5,
+                               textvariable=self.reps_per_set,
+                               font=('Arial', 10))
+        reps_spin.pack(side=tk.RIGHT)
+
+        # Rest duration setting
+        rest_frame = tk.Frame(settings_frame, bg='#2d2d2d')
+        rest_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(rest_frame, text="Rest duration (s):", bg='#2d2d2d',
+                 fg='white', font=('Arial', 9)).pack(side=tk.LEFT)
+        rest_spin = tk.Spinbox(rest_frame, from_=10, to=120, width=5,
+                               textvariable=self.rest_prompt_duration,
+                               font=('Arial', 10))
+        rest_spin.pack(side=tk.RIGHT)
 
         # Audio toggle
         audio_check = tk.Checkbutton(settings_frame, text="Audio Cues",
@@ -344,6 +372,22 @@ class PoseCoachGUI:
             # Same message, just keep showing it
             self.feedback_msg = new_feedback
 
+    def trigger_rest_prompt(self):
+        """Activate a timed rest prompt after a set is completed."""
+        duration = max(1, int(self.rest_prompt_duration.get()))
+        self.rest_prompt_end_time = time.time() + duration
+        self.rest_prompt_active = True
+        # mark start of rest time window as well
+        if not self.rest_start:
+            self.rest_start = time.time()
+        # immediate feedback (will be kept active in process_frame)
+        self.update_feedback("SET COMPLETED! TAKE A REST")
+        if self.audio_enabled.get():
+            try:
+                print('\a')
+            except Exception:
+                pass
+
     def detect_bicep_curl(self, keypoints):
         """Detect bicep curl reps and provide form feedback"""
         # Detect both arms and use the one with better visibility or more flexion
@@ -420,6 +464,10 @@ class PoseCoachGUI:
                 self.stage = "curled"
                 self.rep_count += 1
 
+                # Rest prompt if reached reps-per-set
+                if self.rep_count % max(1, int(self.reps_per_set.get())) == 0:
+                    self.trigger_rest_prompt()
+
                 if self.rep_start_time:
                     rep_duration = time.time() - self.rep_start_time
                     self.rep_times.append(rep_duration)
@@ -485,6 +533,10 @@ class PoseCoachGUI:
             self.stage = "down"
             self.rep_count += 1
 
+            # Rest prompt if reached reps-per-set
+            if self.rep_count % max(1, int(self.reps_per_set.get())) == 0:
+                self.trigger_rest_prompt()
+
             if self.rep_start_time:
                 rep_duration = time.time() - self.rep_start_time
                 self.rep_times.append(rep_duration)
@@ -537,6 +589,10 @@ class PoseCoachGUI:
         if self.current_angle < threshold and self.stage == 'up':
             self.stage = "down"
             self.rep_count += 1
+
+            # Rest prompt if reached reps-per-set
+            if self.rep_count % max(1, int(self.reps_per_set.get())) == 0:
+                self.trigger_rest_prompt()
 
             if self.rep_start_time:
                 rep_duration = time.time() - self.rep_start_time
@@ -668,6 +724,18 @@ class PoseCoachGUI:
         else:
             self.feedback_msg = "⚠ NO PERSON DETECTED"
 
+        # While a rest prompt is active, override feedback with a countdown
+        if self.rest_prompt_active:
+            remaining = int(self.rest_prompt_end_time - time.time())
+            if remaining > 0:
+                self.feedback_msg = f"SET COMPLETED! TAKE A REST: {remaining}s"
+            else:
+                # End of rest: record rest time accumulation and clear flag
+                self.rest_prompt_active = False
+                if self.rest_start:
+                    self.rest_time += time.time() - self.rest_start
+                    self.rest_start = None
+
         self.update_stats_display()
 
         # Draw feedback message on video feed for better visibility
@@ -754,6 +822,9 @@ class PoseCoachGUI:
         self.stage = None
         self.best_angle = None
         self.angle_history.clear()
+        # cancel any active rest prompt when changing exercise
+        self.rest_prompt_active = False
+        self.rest_start = None
         self.update_stats_display()
 
     def new_set(self):
@@ -761,6 +832,9 @@ class PoseCoachGUI:
         self.set_count += 1
         self.rep_count = 0
         self.stage = None
+        # cancel rest prompt when manually starting new set
+        self.rest_prompt_active = False
+        self.rest_start = None
         self.update_stats_display()
         messagebox.showinfo("New Set", f"Starting Set {self.set_count}")
 
